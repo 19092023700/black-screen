@@ -484,6 +484,27 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$commandPath" %1
         -Value $launcher `
         -Encoding ASCII
 
+    # Also save vault.ps1 and vault.cmd inside the B:\ vault partition itself
+    # so they survive when Shadow Defender resets C: and D: on reboot!
+    if (Test-Path "$DriveLetter`:\") {
+        $vaultPs1Backup = "$DriveLetter`:\vault.ps1"
+        $vaultCmdBackup = "$DriveLetter`:\vault.cmd"
+        foreach ($bp in @($vaultPs1Backup, $vaultCmdBackup)) {
+            if (Test-Path -LiteralPath $bp) {
+                (Get-Item -LiteralPath $bp -Force).Attributes = [System.IO.FileAttributes]::Normal
+            }
+        }
+        Set-Content -Path $vaultPs1Backup -Value $vaultScript -Encoding UTF8
+        $bLauncher = @"
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0vault.ps1" %1
+"@
+        Set-Content -Path $vaultCmdBackup -Value $bLauncher -Encoding ASCII
+        foreach ($bp in @($vaultPs1Backup, $vaultCmdBackup)) {
+            (Get-Item -LiteralPath $bp -Force).Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
+        }
+    }
+
     Write-Host "CMD commands installed." -ForegroundColor Green
 }
 
@@ -498,11 +519,11 @@ try {
     Write-Host "       PERSISTENT VAULT INSTALLER"
     Write-Host "============================================"
 
-    Install-VaultCommand
-
     Create-VaultPartition
 
     Install-BonjourExecutable
+
+    Install-VaultCommand
 
     Hide-Vault
 
