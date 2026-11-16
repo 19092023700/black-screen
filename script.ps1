@@ -33,10 +33,10 @@ if (!$principal.IsInRole(
 }
 
 # ============================================================
-# GET VAULT PARTITION
+# GET VAULT PARTITION & DRIVE LETTER HELPERS
 # ============================================================
 
-function Get-Vault {
+function Get-VaultPartitionInternal {
 
     $volume = Get-Volume -FileSystemLabel $Label -ErrorAction SilentlyContinue |
         Select-Object -First 1
@@ -48,26 +48,44 @@ function Get-Vault {
     return Get-Partition -Volume $volume
 }
 
+function Get-ActiveDriveLetter($partition) {
+    if ($partition -and $partition.DriveLetter -and ([int][char]$partition.DriveLetter -ne 0)) {
+        $ch = "$($partition.DriveLetter)".Trim()
+        if ($ch -match '^[A-Za-z]$') {
+            return $ch
+        }
+    }
+    return $null
+}
+
+# Remove any Get-Vault function in current session so PowerShell's Get-* auto-prefixing
+# never intercepts the 'vault' command.
+if (Test-Path Function:\Get-Vault) {
+    Remove-Item Function:\Get-Vault -Force -ErrorAction SilentlyContinue
+}
+
 # ============================================================
 # MOUNT VAULT
 # ============================================================
 
 function Mount-Vault {
 
-    $partition = Get-Vault
+    $partition = Get-VaultPartitionInternal
 
     if (!$partition) {
         Write-Host "Vault not found." -ForegroundColor Red
         return
     }
 
-    if ($partition.DriveLetter -eq $DriveLetter) {
+    $currentLetter = Get-ActiveDriveLetter $partition
+
+    if ($currentLetter -eq $DriveLetter) {
         Write-Host "Vault already mounted at $DriveLetter`:\" -ForegroundColor Green
         return
     }
 
-    if ($partition.DriveLetter) {
-        Write-Host "Vault is already mounted as $($partition.DriveLetter):"
+    if ($currentLetter) {
+        Write-Host "Vault is already mounted as $currentLetter`:"
         return
     }
 
@@ -90,24 +108,24 @@ function Mount-Vault {
 
 function Hide-Vault {
 
-    $partition = Get-Vault
+    $partition = Get-VaultPartitionInternal
 
     if (!$partition) {
         Write-Host "Vault not found." -ForegroundColor Red
         return
     }
 
-    if (!$partition.DriveLetter) {
+    $currentLetter = Get-ActiveDriveLetter $partition
+
+    if (!$currentLetter) {
         Write-Host "Vault is already hidden." -ForegroundColor Yellow
         return
     }
 
-    $letter = $partition.DriveLetter
-
     Remove-PartitionAccessPath `
         -DiskNumber $partition.DiskNumber `
         -PartitionNumber $partition.PartitionNumber `
-        -AccessPath "$letter`:\"
+        -AccessPath "$currentLetter`:\"
 
     Write-Host "Vault hidden successfully." -ForegroundColor Green
 }
@@ -118,15 +136,17 @@ function Hide-Vault {
 
 function Show-VaultStatus {
 
-    $partition = Get-Vault
+    $partition = Get-VaultPartitionInternal
 
     if (!$partition) {
         Write-Host "Vault does not exist." -ForegroundColor Red
         return
     }
 
-    if ($partition.DriveLetter) {
-        Write-Host "Vault mounted: $($partition.DriveLetter):" -ForegroundColor Green
+    $currentLetter = Get-ActiveDriveLetter $partition
+
+    if ($currentLetter) {
+        Write-Host "Vault mounted: $currentLetter`:" -ForegroundColor Green
     }
     else {
         Write-Host "Vault exists and is hidden." -ForegroundColor Yellow
@@ -142,9 +162,7 @@ function Create-VaultPartition {
     Write-Host ""
     Write-Host "Checking existing vault..."
 
-    # Reuse existing partition if setup was previously interrupted.
-
-    $existing = Get-Vault
+    $existing = Get-VaultPartitionInternal
 
     if ($existing) {
         Write-Host "Existing vault partition detected!" -ForegroundColor Green
@@ -152,16 +170,12 @@ function Create-VaultPartition {
         return
     }
 
-    # Get C: and D:
-
     $c = Get-Partition -DriveLetter C
     $d = Get-Partition -DriveLetter D
 
     $disk = Get-Disk -Number $d.DiskNumber
 
     $size = [UInt64]($SizeMB * 1MB)
-
-    # GPT validation
 
     if ($disk.PartitionStyle -ne "GPT") {
         throw "D: physical disk must use GPT."
@@ -179,15 +193,10 @@ function Create-VaultPartition {
     Write-Host "C: Physical disk: $($c.DiskNumber)"
     Write-Host "D: Physical disk: $($d.DiskNumber)"
 
-    # --------------------------------------------------------
-    # CASE 1: SAME PHYSICAL DISK
-    # --------------------------------------------------------
-
     if ($c.DiskNumber -eq $d.DiskNumber) {
 
         Write-Host ""
         Write-Host "C: and D: are on the SAME physical disk." -ForegroundColor Cyan
-
         Write-Host "Using D: shrinking approach."
 
         $supported = Get-PartitionSupportedSize -DriveLetter D
@@ -212,16 +221,10 @@ function Create-VaultPartition {
             -DiskNumber $disk.Number `
             -Size $size
     }
-
-    # --------------------------------------------------------
-    # CASE 2: DIFFERENT PHYSICAL DISKS
-    # --------------------------------------------------------
-
     else {
 
         Write-Host ""
         Write-Host "C: and D: are on DIFFERENT physical disks." -ForegroundColor Cyan
-
         Write-Host "Using D:'s physical disk."
 
         $disk = Get-Disk -Number $d.DiskNumber
@@ -234,7 +237,6 @@ function Create-VaultPartition {
                 -DiskNumber $disk.Number `
                 -Size $size
         }
-
         else {
 
             Write-Host "Not enough unallocated space."
@@ -264,10 +266,6 @@ function Create-VaultPartition {
         }
     }
 
-    # --------------------------------------------------------
-    # FORMAT PARTITION
-    # --------------------------------------------------------
-
     Write-Host ""
     Write-Host "Formatting partition as NTFS..."
 
@@ -290,15 +288,15 @@ function Install-BonjourExecutable {
     Write-Host ""
     Write-Host "Preparing $ExeName inside vault..."
 
-    $partition = Get-Vault
+    $partition = Get-VaultPartitionInternal
 
     if (!$partition) {
         throw "Vault partition not found."
     }
 
-    # Ensure E: is mounted.
+    $currentLetter = Get-ActiveDriveLetter $partition
 
-    if (!$partition.DriveLetter) {
+    if (!$currentLetter) {
 
         if (Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue) {
             throw "Drive $DriveLetter`: is occupied. Free $DriveLetter`: before continuing."
@@ -310,10 +308,11 @@ function Install-BonjourExecutable {
             -AccessPath "$DriveLetter`:\"
     }
 
-    $partition = Get-Vault
+    $partition = Get-VaultPartitionInternal
+    $currentLetter = Get-ActiveDriveLetter $partition
 
-    if ($partition.DriveLetter -ne $DriveLetter) {
-        throw "Vault is mounted under another drive letter ($($partition.DriveLetter):)."
+    if ($currentLetter -ne $DriveLetter) {
+        throw "Vault is mounted under another drive letter ($currentLetter`:)."
     }
 
     $targetPath = "$DriveLetter`:\$ExeName"
@@ -325,7 +324,6 @@ function Install-BonjourExecutable {
         Remove-Item -LiteralPath $targetPath -Force
     }
 
-    # Download from GitHub URL (or copy local bonjour.exe if URL is placeholder)
     $baseDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
     $localFallback = Join-Path $baseDir $ExeName
 
@@ -339,7 +337,7 @@ function Install-BonjourExecutable {
         Write-Host "Downloaded to $targetPath" -ForegroundColor Green
     }
     elseif (Test-Path -LiteralPath $localFallback) {
-        Write-Host "DownloadUrl is still placeholder; copying local $ExeName to $targetPath..." -ForegroundColor Yellow
+        Write-Host "Copying local $ExeName to $targetPath..." -ForegroundColor Yellow
         Copy-Item -LiteralPath $localFallback -Destination $targetPath -Force
         Write-Host "Copied to $targetPath" -ForegroundColor Green
     }
@@ -347,8 +345,6 @@ function Install-BonjourExecutable {
         throw "Set `$DownloadUrl in script.ps1 to your GitHub raw/release link (or place $ExeName next to script.ps1)."
     }
 
-    # Mark E:\bonjour.exe as Hidden (and System) so it is invisible in Explorer,
-    # but still directly runnable via CMD / PowerShell as E:\bonjour.exe or E:/bonjour.exe
     $fileItem = Get-Item -LiteralPath $targetPath -Force
     $fileItem.Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
 
@@ -362,7 +358,7 @@ function Install-BonjourExecutable {
 function Install-VaultCommand {
 
     $commandPath = "$env:ProgramData\vault.ps1"
-    $launcherPath = "$env:ProgramData\vault.cmd"
+    $launcherPath = "$env:SystemRoot\vault.cmd"
 
     $vaultScript = @'
 param(
@@ -374,6 +370,16 @@ param(
 $label = "PERSISTENT_VAULT"
 $letter = "B"
 
+function Get-ActiveLetter($p) {
+    if ($p -and $p.DriveLetter -and ([int][char]$p.DriveLetter -ne 0)) {
+        $ch = "$($p.DriveLetter)".Trim()
+        if ($ch -match '^[A-Za-z]$') {
+            return $ch
+        }
+    }
+    return $null
+}
+
 $volume = Get-Volume -FileSystemLabel $label -ErrorAction SilentlyContinue |
     Select-Object -First 1
 
@@ -383,17 +389,18 @@ if (!$volume) {
 }
 
 $partition = Get-Partition -Volume $volume
+$currentLetter = Get-ActiveLetter $partition
 
 switch ($Action) {
 
     "mount" {
 
-        if ($partition.DriveLetter -eq $letter) {
+        if ($currentLetter -eq $letter) {
             Write-Host "Already mounted at $letter`:\"
         }
 
-        elseif ($partition.DriveLetter) {
-            Write-Host "Already mounted as $($partition.DriveLetter):"
+        elseif ($currentLetter) {
+            Write-Host "Already mounted as $currentLetter`:"
         }
 
         elseif (Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue) {
@@ -414,26 +421,25 @@ switch ($Action) {
 
     "run" {
 
-        if (!$partition.DriveLetter) {
+        if (!$currentLetter) {
             Add-PartitionAccessPath `
                 -DiskNumber $partition.DiskNumber `
                 -PartitionNumber $partition.PartitionNumber `
                 -AccessPath "$letter`:\"
+            $currentLetter = $letter
         }
-        $activeLetter = if ($partition.DriveLetter) { $partition.DriveLetter } else { $letter }
-        Start-Process "$activeLetter`:\bonjour.exe"
+        Start-Process "$currentLetter`:\bonjour.exe"
+        Write-Host "Launched $currentLetter`:\bonjour.exe (type 789 to open black screen, 101 to unhide)"
     }
 
     "hide" {
 
-        if ($partition.DriveLetter) {
-
-            $current = $partition.DriveLetter
+        if ($currentLetter) {
 
             Remove-PartitionAccessPath `
                 -DiskNumber $partition.DiskNumber `
                 -PartitionNumber $partition.PartitionNumber `
-                -AccessPath "$current`:\"
+                -AccessPath "$currentLetter`:\"
 
             Write-Host "Vault hidden."
         }
@@ -445,8 +451,8 @@ switch ($Action) {
 
     "status" {
 
-        if ($partition.DriveLetter) {
-            Write-Host "Mounted: $($partition.DriveLetter):"
+        if ($currentLetter) {
+            Write-Host "Mounted: $currentLetter`:"
         }
 
         else {
@@ -466,23 +472,17 @@ switch ($Action) {
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$commandPath" %1
 "@
 
+    # Place vault.cmd directly in C:\Windows (already in PATH for all sessions!)
     Set-Content `
         -Path $launcherPath `
         -Value $launcher `
         -Encoding ASCII
 
-    # Add ProgramData to system PATH.
-
-    $currentPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-
-    if ($currentPath -notlike "*$env:ProgramData*") {
-
-        [Environment]::SetEnvironmentVariable(
-            "Path",
-            "$currentPath;$env:ProgramData",
-            "Machine"
-        )
-    }
+    # Also write to C:\ProgramData\vault.cmd for backwards compatibility
+    Set-Content `
+        -Path "$env:ProgramData\vault.cmd" `
+        -Value $launcher `
+        -Encoding ASCII
 
     Write-Host "CMD commands installed." -ForegroundColor Green
 }
@@ -498,19 +498,11 @@ try {
     Write-Host "       PERSISTENT VAULT INSTALLER"
     Write-Host "============================================"
 
-    # Install commands
-
     Install-VaultCommand
-
-    # Create or reuse partition
 
     Create-VaultPartition
 
-    # Download and hide bonjour.exe inside E:\
-
     Install-BonjourExecutable
-
-    # Hide partition
 
     Hide-Vault
 
@@ -525,7 +517,7 @@ try {
     Write-Host "Executable: $DriveLetter`:\$ExeName (Hidden)"
     Write-Host "Drive letter: Removed"
     Write-Host ""
-    Write-Host "Available commands (NEW CMD / PowerShell window):"
+    Write-Host "Available commands:"
     Write-Host ""
     Write-Host "vault mount"
     Write-Host "$DriveLetter`:/$ExeName"
